@@ -1,2 +1,7 @@
 local-network-access.md
 static-routes.md
+
+# Network Backup Files
+02-infrastructure-design/edgerouter_backup.tar.gz
+02-infrastructure-design/unifi_switch_backup.txt
+02-infrastructure-design/backup-config.txt
