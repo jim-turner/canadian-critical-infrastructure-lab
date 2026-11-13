@@ -5,7 +5,14 @@ import json
 import urllib.request
 
 LOG_PATH = "/opt/zeek/logs/current/notice.log"
-WEBHOOK_URL = "http://10.0.30.20:1880/zeek-alert"
+HMI_WEBHOOK_URL = "http://10.0.30.20:1880/zeek-alert"
+SOAR_ISOLATE_URL = "http://10.0.30.10:9090/isolate"
+
+CRITICAL_NOTES = {
+    "OT_Modbus_IDS::Safety_Interlock_Tampering",
+    "OT_Modbus_IDS::Sensor_Register_Spoofing",
+    "OT_Modbus_IDS::Rapid_Modbus_Write_Burst"
+}
 
 def follow(path):
     while not os.path.exists(path):
@@ -27,25 +34,33 @@ def follow(path):
             continue
         yield line
 
+def post_json(url, payload):
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        urllib.request.urlopen(req, timeout=2)
+    except Exception:
+        pass
+
 for line in follow(LOG_PATH):
     if line.startswith("#") or not line.strip():
         continue
     cols = line.strip().split("\t")
     if len(cols) >= 12:
+        note = cols[10]
+        src = cols[2]
         payload = {
             "ts": cols[0],
-            "src": cols[2],
+            "src": src,
             "dst": cols[4],
-            "note": cols[10],
+            "note": note,
             "msg": cols[11]
         }
-        req = urllib.request.Request(
-            WEBHOOK_URL,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        try:
-            urllib.request.urlopen(req, timeout=2)
-        except Exception:
-            pass
+        if note in CRITICAL_NOTES:
+            post_json(SOAR_ISOLATE_URL, payload)
+            payload["msg"] = f"[AUTO-CONTAINED: {src} BLOCKED ON TCP/502] " + payload["msg"]
+        post_json(HMI_WEBHOOK_URL, payload)
