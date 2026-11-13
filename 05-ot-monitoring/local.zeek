@@ -113,3 +113,4 @@ redef digest_salt = "Please change this value.";
 # Uncomment this to source zkg's package state
 # @load packages
 redef ignore_checksums = T;
+@load ./ot-modbus-ids
