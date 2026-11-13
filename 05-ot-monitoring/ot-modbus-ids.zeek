@@ -5,69 +5,101 @@ module OT_Modbus_IDS;
 
 export {
     redef enum Notice::Type += {
-        ## Fired when a non-HMI IP issues a Modbus write command
+        ## Stage 1: Discovery - Non-HMI host reading coils/registers or probing device ID
+        Unauthorized_Modbus_Recon,
+        ## Stage 2: Impair Process Control - Unauthorized write from non-HMI IP
         Unauthorized_Modbus_Write,
-        ## Fired when any device attempts to write to protected safety coil 0 (%QX0.0)
+        ## Stage 3: Inhibit Response Function - Tampering with safety alarm coil 0
         Safety_Interlock_Tampering,
-        ## Fired when any device attempts to overwrite sensor holding registers (%MW0)
-        Sensor_Register_Spoofing
+        ## Stage 4: Manipulation of Control - Spoofing tank level holding register
+        Sensor_Register_Spoofing,
+        ## Rapid write burst detection (anti-automation / replay indicator)
+        Rapid_Modbus_Write_Burst
     };
 
-    ## Authorized HMI IP address
     const authorized_hmi: addr = 10.0.30.20 &redef;
+    global write_counter: table[addr] of count &default=0 &create_expire=10sec;
 }
 
-# 1. Detect unauthorized single-coil writes (FC 5) or safety interlock tampering
+# Stage 1: Detect Modbus Coil/Register Enumeration from unauthorized IPs (T0801 / T0846)
+event modbus_read_coils_request(c: connection, headers: ModbusHeaders, start_address: count, quantity: count)
+    {
+    if ( c$id$orig_h != authorized_hmi )
+        {
+        NOTICE([
+            $note=Unauthorized_Modbus_Recon,
+            $conn=c,
+            $msg=fmt("MITRE T0801 Discovery: Non-HMI IP %s enumerated Coils (start=%d, qty=%d) on PLC %s", c$id$orig_h, start_address, quantity, c$id$resp_h),
+            $identifier=cat(c$id$orig_h, "read_coils")
+        ]);
+        }
+    }
+
+event modbus_read_holding_registers_request(c: connection, headers: ModbusHeaders, start_address: count, quantity: count)
+    {
+    if ( c$id$orig_h != authorized_hmi )
+        {
+        NOTICE([
+            $note=Unauthorized_Modbus_Recon,
+            $conn=c,
+            $msg=fmt("MITRE T0801 Discovery: Non-HMI IP %s enumerated Holding Registers (start=%d, qty=%d) on PLC %s", c$id$orig_h, start_address, quantity, c$id$resp_h),
+            $identifier=cat(c$id$orig_h, "read_hr")
+        ]);
+        }
+    }
+
+# Track rapid write bursts across any source IP (including a compromised HMI)
+function track_write_rate(c: connection)
+    {
+    local src = c$id$orig_h;
+    ++write_counter[src];
+    if ( write_counter[src] >= 5 )
+        {
+        NOTICE([
+            $note=Rapid_Modbus_Write_Burst,
+            $conn=c,
+            $msg=fmt("MITRE T0855 Anomaly: Rapid Modbus write burst (%d writes in 10s) from %s to PLC %s", write_counter[src], src, c$id$resp_h),
+            $identifier=cat(src, "burst")
+        ]);
+        }
+    }
+
+# Stage 2 & 3: Unauthorized Coil Writes & Safety Interlock Tampering (T0855 / T0878)
 event modbus_write_single_coil_request(c: connection, headers: ModbusHeaders, address: count, value: bool)
     {
     local src = c$id$orig_h;
     local dst = c$id$resp_h;
+    track_write_rate(c);
 
-    # Flag any write coming from an IP other than the Node-RED HMI
     if ( src != authorized_hmi )
         {
         NOTICE([
             $note=Unauthorized_Modbus_Write,
             $conn=c,
-            $msg=fmt("Unauthorized Modbus FC5 Write Single Coil from %s to PLC %s (Coil %d -> %s)", src, dst, address, value),
+            $msg=fmt("MITRE T0855 Unauthorized Command: Non-HMI %s wrote Coil %d -> %s on PLC %s", src, address, value, dst),
             $identifier=cat(src, dst, address)
         ]);
         }
 
-    # Flag any attempt to write directly to Coil 0 (high_level_alarm %QX0.0)
     if ( address == 0 )
         {
         NOTICE([
             $note=Safety_Interlock_Tampering,
             $conn=c,
-            $msg=fmt("CRITICAL: Attempt to overwrite High-Water Alarm Coil 0 from %s (value=%s)", src, value),
+            $msg=fmt("MITRE T0878 Inhibit Response: Attempt to overwrite High-Water Alarm Coil 0 (value=%s) from %s", value, src),
             $identifier=cat(src, "coil0")
         ]);
         }
     }
 
-# 2. Detect unauthorized multi-coil writes (FC 15)
-event modbus_write_multiple_coils_request(c: connection, headers: ModbusHeaders, start_address: count, coils: ModbusCoils)
-    {
-    local src = c$id$orig_h;
-    if ( src != authorized_hmi )
-        {
-        NOTICE([
-            $note=Unauthorized_Modbus_Write,
-            $conn=c,
-            $msg=fmt("Unauthorized Modbus FC15 Write Multiple Coils from %s to PLC %s (Start Addr %d)", src, c$id$resp_h, start_address),
-            $identifier=cat(src, c$id$resp_h, "fc15")
-        ]);
-        }
-    }
-
-# 3. Detect unauthorized holding register overwrites (FC 6 / FC 16 - tank_level %MW0)
+# Stage 4: Sensor Holding Register Spoofing (T0836 - Modify Parameter)
 event modbus_write_single_register_request(c: connection, headers: ModbusHeaders, address: count, value: count)
     {
+    track_write_rate(c);
     NOTICE([
         $note=Sensor_Register_Spoofing,
         $conn=c,
-        $msg=fmt("CRITICAL: Attempt to spoof Holding Register %d (value=%d) on PLC %s from %s", address, value, c$id$resp_h, c$id$orig_h),
+        $msg=fmt("MITRE T0836 Modify Parameter: Attempt to overwrite Holding Register %d (value=%d) on PLC %s from %s", address, value, c$id$resp_h, c$id$orig_h),
         $identifier=cat(c$id$orig_h, address)
     ]);
     }
